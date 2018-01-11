@@ -532,8 +532,10 @@ class tma_dashboard():
                 "email":requester.email,
                 "username":requester.username,
             }
-
-            q['output'] = json.loads(task.task_output)
+	    try:
+                q['output'] = json.loads(task.task_output)
+            except:
+                q['output'] = {}
             q['date'] = task.created
             q['progress'] = task.task_state
 
