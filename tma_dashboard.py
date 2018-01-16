@@ -136,10 +136,24 @@ class tma_dashboard():
         :param password: user's password
         :return: User instance of the new user.
         """
-        user = User.objects.create_user(username, email, password)
+        log.warning(u'tma create user password : '+str(password))
+        log.warning(u'tma create user password : '+str(password))
+        log.warning(u'tma create user password : '+str(password))
+        log.warning(u'tma create user password : '+str(password))
+        user = User(
+            username=username,
+            email=email,
+            is_active=True
+        )
+        user.set_password(password)
+        user.save()
+        registration = Registration()
+        registration.register(user)
+        """
         reg = Registration()
         reg.register(user)
-
+        """
+        #user.save()
         profile = UserProfile(user=user)
         profile.custom_field = json.dumps(custom_field)
         profile.save()
@@ -503,14 +517,14 @@ class tma_dashboard():
                     "id":_id,
                     "username":username
                 }
-                _username.append(q)   
+                _username.append(q)
             except:
-                pass    
+                pass
 
         context = {
             "username":_username,
             "email":_email
-        } 
+        }
 
         return context
 
@@ -524,7 +538,7 @@ class tma_dashboard():
             requester = User.objects.get(pk=task.requester_id)
 
             q = {}
-            
+
             q['id'] = task.id
 
             q['requester'] = {
@@ -542,6 +556,3 @@ class tma_dashboard():
             return_list.append(q);
 
         return return_list
-
-
-

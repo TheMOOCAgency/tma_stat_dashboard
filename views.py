@@ -1,3 +1,4 @@
+# coding: utf-8
 """
 Instructor Dashboard Views
 """
@@ -121,7 +122,7 @@ def tma_per_question_views(request,course_id):
 def tma_ensure_email_username(request,course_id):
 
     course_key = SlashSeparatedCourseKey.from_deprecated_string(course_id)
-    
+
     return JsonResponse(tma_dashboard(course_id=course_id,course_key=course_key,request=request).ensure_user_exists())
 
 @login_required
