@@ -42,4 +42,5 @@ def return_select_value(key,value,kwarg):
                         for _row in indice.get("options"):
                             if str(value) == str(_row.get('value')):
                                 value = _row.get('name')
+    
     return value

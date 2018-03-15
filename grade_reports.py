@@ -222,7 +222,7 @@ class grade_reports():
         self.microsite = self.request.get('microsite')
         #get register & certificate fields info
         register_form_ = self.request.get('register_form')
-        certificates_form_ = self.request.get('CERTIFICATE_FORM_EXTRA')
+        certificates_form_ = self.request.get('certificate_form')
 
         log.warning(_("tma_grade_reports_task : microsite : "+self.microsite))
 
@@ -287,7 +287,6 @@ class grade_reports():
                     form_factory.user_id = user_id
                     try:
                         user_certif_profile = form_factory.getForm(user_id=True,microsite=True).get('form')
-			log.warning(user_certif_profile)
                     except:
                         pass
 
@@ -314,12 +313,10 @@ class grade_reports():
 
             except:
                 ensure_user_exist = False
-
             #write user xls line if exist
             if ensure_user_exist:
                 k=0
                 for n in body:
-		    log.warning(n)
                     #insert user mysql value to xls
                     if n in user.keys():
                         if n == 'date_joined':
@@ -339,13 +336,6 @@ class grade_reports():
                         _insert_value = return_select_value(n,user_certif_profile.get(n),certificates_form_)
                         sheet_count.write(j, k, _insert_value)
                         k = k + 1
-			log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
-                        log.warning('is n {} and value {}'.format(n,_insert_value))
                     #insert summary grades mongodb value to xls
                     elif "summary" in n:
                         grade_breakdown = _row.get('users_info').get('summary').get('grade_breakdown')
@@ -375,7 +365,6 @@ class grade_reports():
                 j = j + 1
             else:
                 pass
-        log.warning(_("tma_grade_reports : save file generate_xls"))
 
 	output = BytesIO()
 	_wb.save(output)
