@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+import sys
+reload(sys)
+sys.setdefaultencoding('utf8')
+
 import os
 import json
 from xlwt import *
@@ -19,6 +24,8 @@ from .libs import return_select_value
 from opaque_keys.edx.locations import SlashSeparatedCourseKey
 from opaque_keys.edx.keys import CourseKey
 from courseware.courses import get_course_by_id
+
+from io import BytesIO
 
 from django.core.mail import EmailMessage
 
@@ -117,6 +124,8 @@ class grade_reports():
                     form_factory.user_id = user_id
                     try:
                         user_certif_profile = form_factory.getForm(user_id=True,microsite=True).get('form')
+			log.ingo("user_certif_profile")
+			log.warning(user_certif_profile)
                     except:
                         pass
 
@@ -211,7 +220,6 @@ class grade_reports():
         #get request body
         body = self.request.get('form')
         self.microsite = self.request.get('microsite')
-
         #get register & certificate fields info
         register_form_ = self.request.get('register_form')
         certificates_form_ = self.request.get('CERTIFICATE_FORM_EXTRA')
@@ -279,6 +287,7 @@ class grade_reports():
                     form_factory.user_id = user_id
                     try:
                         user_certif_profile = form_factory.getForm(user_id=True,microsite=True).get('form')
+			log.warning(user_certif_profile)
                     except:
                         pass
 
@@ -310,7 +319,7 @@ class grade_reports():
             if ensure_user_exist:
                 k=0
                 for n in body:
-
+		    log.warning(n)
                     #insert user mysql value to xls
                     if n in user.keys():
                         if n == 'date_joined':
@@ -330,16 +339,28 @@ class grade_reports():
                         _insert_value = return_select_value(n,user_certif_profile.get(n),certificates_form_)
                         sheet_count.write(j, k, _insert_value)
                         k = k + 1
-
+			log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
+                        log.warning('is n {} and value {}'.format(n,_insert_value))
                     #insert summary grades mongodb value to xls
                     elif "summary" in n:
                         grade_breakdown = _row.get('users_info').get('summary').get('grade_breakdown')
                         for key,value in grade_breakdown.items():
                             #insert grade value to xls
                             details = value['detail']
-                            details = details.replace(value['category'],"").replace(" = ","").replace("of a possible ","").replace("%","")
+                            details = details.replace(value['category'],'')
+			    details = details.replace(" = ",'')
+			    details = details.replace("of a possible ",'')
+			    details = details.replace("%",'')
                             split = details.split(" ")
-                            avg = str(int(float(split[0])/float(split[1]) * 100))+"%"
+	                    try:
+                                avg = str(int(float(split[0])/float(split[1]) * 100))+"%"
+			    except:
+				avg = "0%"
                             sheet_count.write(j, k, avg)
                             k = k + 1
 
@@ -355,11 +376,10 @@ class grade_reports():
             else:
                 pass
         log.warning(_("tma_grade_reports : save file generate_xls"))
-        _wb.save(self.filepath)
-        _file = open(self.filepath,'r')
-        _content = _file.read()
-        _file.close()
 
+	output = BytesIO()
+	_wb.save(output)
+	_content = output.getvalue()
         #sending grades reports by mail
         #user requested
         sended_email = self.request.get('send_to')
@@ -395,5 +415,4 @@ class grade_reports():
         _content = _file.read()
         response = HttpResponse(_content, content_type="application/vnd.ms-excel")
         response['Content-Disposition'] = "attachment; filename="+self.filename
-        os.remove(self.filepath)
         return response
