@@ -1,12 +1,22 @@
 # -*- coding: utf-8 -*-
 import sys
+import string
+import random
+from datetime import datetime
+import os
+import importlib
+import csv
+import time
+from xlwt import *
+import json
+from io import BytesIO
 reload(sys)
 sys.setdefaultencoding('utf8')
 
 from opaque_keys.edx.locations import SlashSeparatedCourseKey
 from xmodule.modulestore.django import modulestore
 from courseware.courses import get_course_by_id
-from student.models import User,CourseEnrollment,UserProfile
+from student.models import User,CourseEnrollment,UserProfile,LoginFailures
 from course_api.blocks.api import get_blocks
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 from lms.djangoapps.tma_grade_tracking.models import dashboardStats
@@ -27,6 +37,7 @@ from django.utils.translation import ugettext as _
 from django.db import IntegrityError, transaction
 from instructor.views.api import generate_random_string,create_manual_course_enrollment
 from django.core.exceptions import ValidationError, PermissionDenied
+from openedx.core.djangoapps.course_groups.models import CohortMembership, CourseUserGroup
 
 from django.contrib.auth.models import User
 
@@ -53,13 +64,33 @@ from lms.djangoapps.instructor.enrollment import (
     send_beta_role_email,
     unenroll_email,
 )
-
 from instructor.enrollment import render_message_to_string
 from django.core.mail import send_mail
 
 #taskmodel
-
 from tma_task.models import tmaTask
+
+#USER MANAGEMENT
+from django.utils.http import int_to_base36
+from django.contrib.auth.tokens import default_token_generator
+from student.views import password_reset_confirm_wrapper
+from django.core.urlresolvers import reverse
+
+#EMAIL MANAGEMENT
+import smtplib
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEText import MIMEText
+from email.MIMEBase import MIMEBase
+from email import encoders
+from courseware.courses import get_course_by_id
+
+#Course timer
+#from tma_apps.models import TmaCourseOverview
+from django.core import serializers
+
+from openedx.core.djangoapps.course_groups.cohorts import is_course_cohorted
+
+
 
 log = logging.getLogger(__name__)
 
@@ -80,11 +111,8 @@ class tma_dashboard():
         register_fields = [
             {
                 "name":"email",
-                "required":True
-            },
-            {
-                "name":"username",
-                "required":True
+                "required":True,
+                "label":"Email"
             }
         ]
 
@@ -95,11 +123,13 @@ class tma_dashboard():
 
                 name = row.get('name')
                 required = row.get('required')
+                label = row.get('label')
 
                 register_fields.append(
                         {
                             "name":name,
-                            "required":required
+                            "required":required,
+                            "label":label
                         }
                     )
 
@@ -118,11 +148,13 @@ class tma_dashboard():
 
                 name = row.get('name')
                 required = row.get('required')
+                label=row.get('label')
 
                 certificates_fields.append(
                         {
                             "name":name,
-                            "required":required
+                            "required":required,
+                            "label":label
                         }
                     )
 
@@ -131,7 +163,7 @@ class tma_dashboard():
 
     #password generator
 
-    def create_user_and_user_profile(self,email, username, password, custom_field):
+    def create_user_and_user_profile(self,email, username, password, custom_field, complete_name, first_name, last_name):
         """
         Create a new user, add a new Registration instance for letting user verify its identity and create a user profile.
         :param email: user's email address
@@ -141,14 +173,12 @@ class tma_dashboard():
         :param password: user's password
         :return: User instance of the new user.
         """
-        log.warning(u'tma create user password : '+str(password))
-        log.warning(u'tma create user password : '+str(password))
-        log.warning(u'tma create user password : '+str(password))
-        log.warning(u'tma create user password : '+str(password))
         user = User(
             username=username,
             email=email,
-            is_active=True
+            is_active=True,
+            first_name=first_name,
+            last_name=last_name,
         )
         user.set_password(password)
         user.save()
@@ -161,11 +191,12 @@ class tma_dashboard():
         #user.save()
         profile = UserProfile(user=user)
         profile.custom_field = json.dumps(custom_field)
+        profile.name=complete_name
         profile.save()
 
         return user
 
-    def create_and_enroll_user(self,email, username, custom_field, password, course_id, course_mode, enrolled_by, email_params):
+    def create_and_enroll_user(self,email, username, custom_field, password,complete_name, course_id, course_mode, enrolled_by, email_params, first_name, last_name):
         """
         Create a new user and enroll him/her to the given course, return list of errors in the following format
             Error format:
@@ -189,7 +220,7 @@ class tma_dashboard():
         try:
             with transaction.atomic():
                 # Create a new user
-                user = self.create_user_and_user_profile(email, username, password, custom_field)
+                user = self.create_user_and_user_profile(email, username, password, custom_field,complete_name, first_name, last_name)
                 # Enroll user to the course and add manual enrollment audit trail
                 create_manual_course_enrollment(
                     user=user,
@@ -218,6 +249,7 @@ class tma_dashboard():
                     'email_address': email,
                     'password': password,
                     'platform_name': self.site_name,
+                    'first_name': first_name,
                 })
                 #update sitename params
                 email_params['site_name'] = self.site_name
@@ -345,123 +377,142 @@ class tma_dashboard():
         return password
 
     def task_generate_user(self):
-        #ici self. request correspond a task_input du systeme de task
         task_input = self.request
-        #row valide issues du csv
         valid_rows = task_input.get("valid_rows")
-        #microsite prefix
         microsite = task_input.get("microsite")
-        log.warning(u'tma_dashboard.task_generate_user inscription users pour le microsite : '+microsite)
-        #info du register_form associe au microsite
-        register_form = task_input.get("register_form")
-        #requester id
+
         requester_id = task_input.get("requester_id")
-        #requester user
         _requester_user = User.objects.get(pk=requester_id)
-        #site_name hydrate
         self.site_name = task_input.get('site_name')+' '
 
+        log.warning(u'tma_dashboard.task_generate_user inscription users pour le microsite : '+microsite)
         log.warning(u'tma_dashboard.task_generate_user inscription users par le username '+_requester_user.username+' email : '+_requester_user.email)
-        #generated passwords
         generated_passwords = []
-        #tableau de retour confirmant les utilisateurs cree compose du dict {"id":int,"email":"example@example.com"}
         _generates = []
-        #tableau de retour donannt les utilisateurs dont le compte n'a pas ete cree dans un dict tel que {"email":"example@example.com","response":"la raison du fail"}
         _failed = []
-        #warning field
         warnings = []
-        #preparer la list contenant les keys du register form induit
+
+        #Get all keys from register form
         register_keys = []
+        register_form = task_input.get("register_form")
         for _key in register_form:
             register_keys.append(_key.get('name'))
+
         # for white labels we use 'shopping cart' which uses CourseMode.DEFAULT_SHOPPINGCART_MODE_SLUG as
         # course mode for creating course enrollments.
         if CourseMode.is_white_label(self.course_key):
             course_mode = CourseMode.DEFAULT_SHOPPINGCART_MODE_SLUG
         else:
             course_mode = None
-        #action sur chacunes des rows
+
+        #TREATING EACH USER
         for _user in valid_rows:
             #get current users values
-            email = _user.get('email')
-            username = _user.get('username')
-
-            #check is validate email
-            email_params = get_email_params(self.course, True, secure=True)
             try:
-                validate_email(email)  # Raises ValidationError if invalid
+                email = _user.get('email')
+                username = email.split('@')[0].replace('-','').replace('.','').replace('_','')[0:10]+'_'+random_string(5)
+                first_name=str(_user.get("first_name"))
+                last_name=str(_user.get("last_name"))
+                complete_name=first_name+' '+last_name
+
+                #check valid email
+                email_params = get_email_params(self.course, True, secure=True)
+                new_course_url='https://'+self.site_name.replace(' ','')+'/dashboard/'+str(self.course.id)
+                email_params.update({
+                    'site_name': self.site_name,
+                    'course_url':new_course_url,
+                })
+            except:
+                _failed.append({
+                    'email': email, 'response': _('Invalid info {email_address}.').format(email_address=email)})
+            try:
+                validate_email(email)
             except ValidationError:
                 _failed.append({
                     'email': email, 'response': _('Invalid email {email_address}.').format(email_address=email)})
-            else:
-                #check if email exist
-                log.info(
-                    u"user '%s' and '%s'",
-                    username,
-                    email
-                )
-                User.objects.filter(email=email)
-                if User.objects.filter(email=email).exists():
-                    # Email address already exists. assume it is the correct user
-                    # and just register the user in the course and send an enrollment email.
-                    user = User.objects.get(email=email)
 
-                    # see if it is an exact match with email and username
-                    # if it's not an exact match then just display a warning message, but continue onwards
-                    if not User.objects.filter(email=email, username=username).exists():
-                        warning_message = _(
-                            'An account with email {email} exists but the provided username {username} '
-                            'is different. Enrolling anyway with {email}.'
-                        ).format(email=email, username=username)
+            if User.objects.filter(email=email).exists():
+                # ENROLL EXISTING USER TO COURSE
+                user = User.objects.get(email=email)
+                # see if it is an exact match with email and username if it's not an exact match then just display a warning message, but continue onwards
+                if not User.objects.filter(email=email, username=username).exists():
+                    warning_message = _(
+                        'An account with email {email} exists but the provided username {username} '
+                        'is different. Enrolling anyway with {email}.'
+                    ).format(email=email, username=username)
 
-                        warnings.append({
-                            'username': username, 'email': email, 'response': warning_message
-                        })
-                        log.warning(u'email %s already exist', email)
-                    else:
-                        log.info(
-                            u"user already exists with username '%s' and email '%s'",
-                            username,
-                            email
-                        )
-                    # enroll a user if it is not already enrolled.
-                    if not CourseEnrollment.is_enrolled(user, self.course_key):
-                        # Enroll user to the course and add manual enrollment audit trail
-                        create_manual_course_enrollment(
-                            user=user,
-                            course_id=self.course_key,
-                            mode=course_mode,
-                            enrolled_by=_requester_user,
-                            reason='Enrolling via csv upload',
-                            state_transition=UNENROLLED_TO_ENROLLED,
-                        )
-                        enroll_email(course_id=self.course_key, student_email=email, auto_enroll=True, email_students=True, email_params=email_params)
+                    warnings.append({
+                        'username': username, 'email': email, 'response': warning_message
+                    })
+                    log.warning(u'email %s already exist', email)
                 else:
-                    # This email does not yet exist, so we need to create a new account
-                    # If username already exists in the database, then create_and_enroll_user
-                    # will raise an IntegrityError exception.
-                    #generate password
-                    password = self.generate_unique_password(generated_passwords)
-                    #generate custom_field
-                    custom_field = {}
-                    #ajout user dans les donnees depuis les key
-                    for key,value in _user.items():
-                        #assurer que la key est presente dans la liste des key et non presente dans les custom_fields actuels
-                        if (key in register_keys) and (not key in custom_field.keys()):
-                            custom_field[key] = value
-
-                    created_user = self.create_and_enroll_user(
-                        email, username, custom_field, password, self.course_id, course_mode, _requester_user, email_params
+                    log.info(
+                        u"user already exists with username '%s' and email '%s'",
+                        username,
+                        email
                     )
-                    #maj de l'info
-                    if created_user != '':
-                        _generates.append(
-                            {"id":created_user.id,"email":created_user.email})
-                    else:
-                        _failed.append(
-                            {"email":email,"reponse":"creation failed"})
+                # enroll a user if it is not already enrolled.
+                if not CourseEnrollment.is_enrolled(user, self.course_key):
+                    create_manual_course_enrollment(
+                        user=user,
+                        course_id=self.course_key,
+                        mode=course_mode,
+                        enrolled_by=_requester_user,
+                        reason='Enrolling via csv upload',
+                        state_transition=UNENROLLED_TO_ENROLLED,
+                    )
+                    enroll_email(course_id=self.course_key, student_email=email, auto_enroll=True, email_students=True, email_params=email_params)
+            else:
+                # CREATE NEW ACCOUNT
+                password = self.generate_unique_password(generated_passwords)
+                #generate custom_field
+                custom_field = {}
+                for key,value in _user.items():
+                    #assurer que la key est presente dans la liste des key et non presente dans les custom_fields actuels
+                    if (key in register_keys) and (not key in custom_field.keys()):
+                        custom_field[key] = value
+
+                created_user = self.create_and_enroll_user(
+                    email, username, custom_field, password, complete_name, self.course_id, course_mode, _requester_user, email_params, first_name, last_name
+                )
+                #maj de l'info
+                if created_user != '':
+                    _generates.append(
+                        {"id":created_user.id,"email":created_user.email})
+                else:
+                    _failed.append(
+                        {"email":email,"reponse":"creation failed"})
         log.warning(u'tma_dashboard.task_generate_user fin inscription users pour le microsite : '+microsite)
         log.warning(u'tma_dashboard.task_generate_user fin inscription users par le username '+_requester_user.username+' email : '+_requester_user.email)
+
+        #Send an email to requester with potential failures
+        status_text=''
+        if not _failed :
+            status_text='Tous les utilisateurs ont bien été créés et/ou inscrits au cours.'
+        else :
+            status_text="Une erreur s'est produite lors de l'inscription des utilisateurs suivants :<ul>"
+            for user in _failed :
+                status_text+="<li>"+user['email']+"</li>"
+            status_text+="</ul><p>Merci de remonter le problème au service IT pour identifier l'erreur sur ces profils. Les autres profils utilisateur ont été correctement créés et/ou inscrits au cours.</p>"
+
+        course=get_course_by_id(self.course_key)
+
+        html = "<html><head></head><body><p>Bonjour,<br><br> L'inscription par CSV de vos utilisateurs au cours "+course.display_name_with_default+" sur le microsite "+microsite+" est maintenant terminée.<br> "+status_text+"<br><br>The MOOC Agency<br></p></body></html>"
+        part2 = MIMEText(html.encode('utf-8'), 'html', 'utf-8')
+        fromaddr = "ne-pas-repondre@themoocagency.com"
+        toaddr = _requester_user.email
+        msg = MIMEMultipart()
+        msg['From'] = fromaddr
+        msg['To'] = toaddr
+        msg['Subject'] = "Import utilisateurs csv"
+        part = MIMEBase('application', 'octet-stream')
+        server = smtplib.SMTP('mail3.themoocagency.com', 25)
+        server.starttls()
+        server.login('contact', 'waSwv6Eqer89')
+        msg.attach(part2)
+        text = msg.as_string()
+        server.sendmail(fromaddr, toaddr, text)
+        server.quit()
 
         retour = {
             "requester": _requester_user.email,
@@ -484,6 +535,12 @@ class tma_dashboard():
         else:
             csv_limits = True
 
+
+        total_participants=CourseEnrollment.objects.enrollment_counts(self.course_key)
+
+        #Course cohorted
+        course_cohorted = is_course_cohorted(self.course_key)
+
         context = {
             "course_id":self.course_id,
             "course":self.course,
@@ -491,7 +548,9 @@ class tma_dashboard():
             "course_structure":course_structure,
             "register_fields":self.required_register_fields(),
             "certificates_fields":self.required_certificates_fields(),
-            "csv_limits":csv_limits
+            "csv_limits":csv_limits,
+            "total_participants":total_participants,
+            "cohorted":course_cohorted,
         }
 
         return render_to_response('tma_dashboard.html', context)
@@ -561,3 +620,66 @@ class tma_dashboard():
             return_list.append(q);
 
         return return_list
+
+
+
+    #USER MANAGEMENT ACTIONS
+    def generate_password_link(self):
+        user_email=self.request.POST.get('user_email')
+        user=User.objects.get(email=user_email)
+        uid=int_to_base36(user.id)
+        token = default_token_generator.make_token(user)
+
+        final_link = reverse(password_reset_confirm_wrapper, args=(uid, token))
+        json ={
+        'link':str(final_link)
+        }
+        return json
+
+    def tma_unlock_account(self):
+        json={}
+        user_email=self.request.POST.get('user_email')
+        user=User.objects.get(email=user_email)
+        if LoginFailures.objects.filter(user=user).exists():
+
+            user_failure = LoginFailures.objects.get(user=user)
+            user_failure.lockout_until = datetime.now()
+            user_failure.failure_count=0
+            user_failure.save()
+            json['success']='User login failure was reset'
+
+        else :
+            json['error']='LoginFailure object doesn\'t exists'
+
+        return json
+
+
+    def tma_activate_account(self):
+        user_email=self.request.POST.get('user_email')
+        if User.objects.filter(email=user_email).exists():
+            try :
+                user=User.objects.get(email=user_email)
+                user.is_active=True
+                user.save()
+                json ={
+                'success':'account activated'
+                }
+            except:
+                json ={
+                'error':'error while activating account'
+                }
+        else :
+            json ={
+            'error':'user account does not exists'
+            }
+
+        return json
+
+
+
+
+
+
+def random_string(length):
+    pool = string.letters + string.digits
+    return ''.join(random.choice(pool) for i in xrange(length))

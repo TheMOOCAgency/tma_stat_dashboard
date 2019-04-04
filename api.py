@@ -9,10 +9,21 @@ from course_api.blocks.api import get_blocks
 from opaque_keys.edx.locations import SlashSeparatedCourseKey
 from courseware.courses import get_course_by_id, get_studio_url
 from lms.djangoapps.grades.new.course_grade import CourseGradeFactory
-from student.models import User,CourseEnrollment,UserProfile
+from student.models import User,CourseEnrollment,UserProfile,LoginFailures
 from xmodule.modulestore.django import modulestore
 import json
 from lms.djangoapps.tma_grade_tracking.models import dashboardStats
+from django.http import JsonResponse
+from opaque_keys.edx.keys import CourseKey
+from django.conf import settings
+from courseware.courses import get_course_by_id
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from courseware.courses import get_courses
+from time import strftime
+from tma_apps.tma_support_functions import is_course_opened,is_enrollment_opened
+from django.utils.translation import ugettext as _
+
+
 
 class stat_dashboard_api():
 
@@ -124,6 +135,84 @@ class stat_dashboard_api():
         context = {
                 "usernames":usernames
             }
+
+        return context
+
+    #Return data of user registered
+    def tma_users_registered(self):
+        context={}
+        enrolled_to_current_course=False
+        user_email = self.request.POST['user_email']
+
+        if User.objects.filter(email=user_email).exists():
+            user=User.objects.get(email=user_email)
+            #Get preprofile info
+            userprofile = UserProfile.objects.get(user=user)
+            try :
+                custom_field=json.loads(user.profile.custom_field)
+                first_name=custom_field['first_name']
+                last_name=custom_field['last_name']
+            except :
+                custom_field = {}
+                last_name='Undefined'
+                first_name='Undefined'
+
+            #Get courses enrollments
+            microsite_courses=get_courses(user=user, org=configuration_helpers.get_value('course_org_filter'))
+
+            user_ms_course_list={}
+            for course in microsite_courses :
+                if CourseEnrollment.objects.filter(user=user, course_id=course.id).exists():
+                    user_ms_course_list[str(course.id)]={
+                        'course_name':course.display_name_with_default,
+                        'course_grades':'/courses/'+str(course.id)+'/progress/'+str(user.id),
+                        'opened_enrollments':is_enrollment_opened(course),
+                        'opened_course':is_course_opened(course),
+                        'on_invitation':course.invitation_only,
+                    }
+
+
+            #Get user grade for this course
+            course_key = SlashSeparatedCourseKey.from_deprecated_string(self.course_id)
+            current_course=get_course_by_id(course_key)
+            grade = CourseGradeFactory().create(user, current_course)
+
+            #User dates
+            if user.last_login is not None:
+                last_login=user.date_joined.strftime("%d-%b-%Y %H:%M:%S")
+            else :
+                last_login=_('User has not logged in yet')
+
+
+            context={
+                'email':str(user_email),
+                'id':str(user.id),
+                'inscription':str(user.date_joined.strftime("%d-%b-%Y %H:%M:%S")),
+                'last_login':last_login,
+                'first_name':first_name,
+                'last_name':last_name,
+                'user_ms_course_list': user_ms_course_list,
+                'custom_field':custom_field,
+                'grade':grade.grade_value['percent'],
+                'passed':grade.grade_value['grade'],
+                'active':user.is_active,
+                'login_failure':LoginFailures.is_user_locked_out(user) ,
+            }
+
+
+            #Check if user is registered to this course
+            course_key=SlashSeparatedCourseKey.from_deprecated_string(self.course_id)
+            if CourseEnrollment.objects.filter(user=user,course_id=course_key, is_active=1).exists():
+                current_course_grades='/courses/'+str(self.course_id)+'/progress/'+str(user.id)
+                context['enrolled_to_current_course']=True
+                context['current_course_grades']=current_course_grades
+            else :
+                context['enrolled_to_current_course']=False
+
+
+        else :
+            context={'error':'Le participant n\'a pas de compte sur nos plateformes.'}
+
 
         return context
 
